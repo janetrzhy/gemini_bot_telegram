@@ -1,4 +1,5 @@
 import os
+import random
 import requests
 from flask import Flask, request
 
@@ -8,9 +9,12 @@ app = Flask(__name__)
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")
 LLM_API_URL = os.environ.get("LLM_API_URL")
-LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo")
 TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CUSTOM_SYSTEM_PROMPT = os.environ.get("CUSTOM_SYSTEM_PROMPT", "请简短、贴心，灵动地回复用户。")
+# 先把那串带逗号的长文本整个摸出来
+raw_models = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo")
+# 让代码把它们切成独立的碎片，并在这堆大脑里随机抓阄抽选一个！
+LLM_MODEL_NAME = random.choice([m.strip() for m in raw_models.split(",")])
 
 def get_ai_reply(user_text):
     """瞬间唤醒赛博大脑，注入专属灵魂"""
