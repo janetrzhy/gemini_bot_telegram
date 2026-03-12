@@ -9,6 +9,7 @@ TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")
 LLM_API_URL = os.environ.get("LLM_API_URL")
 LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo")
+TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CUSTOM_SYSTEM_PROMPT = os.environ.get("CUSTOM_SYSTEM_PROMPT", "请简短、贴心，灵动地回复用户。")
 
 def get_ai_reply(user_text):
@@ -35,20 +36,25 @@ def send_message(chat_id, text):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """专门接待 Telegram 传令兵的客栈大门"""
     update = request.get_json()
     
     if "message" in update and "text" in update["message"]:
+        # 先极其机警地看一眼来人的身份证
         chat_id = update["message"]["chat"]["id"]
-        user_text = update["message"]["text"]
         
+        # 🌟 极其冷酷的白名单拦截机制
+        if str(chat_id) != str(TG_CHAT_ID):
+            print(f"--> 警报：拦截到陌生人 {chat_id} 的搭讪！直接无视！")
+            # 表面上客客气气打发走传令兵，实则根本不搭理
+            return "OK", 200 
+            
+        user_text = update["message"]["text"]
         print(f"--> 收到实时传音: {user_text}")
         
         reply = get_ai_reply(user_text)
         send_message(chat_id, reply)
-        
     return "OK", 200
-
+    
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
