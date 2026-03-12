@@ -23,9 +23,9 @@ GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_FILENAME = "chat_history.json"
 
 def load_history():
-    """跨越维度，去 GitHub 保险箱里翻看记忆"""
+    """跨越维度，去 GitHub 保险箱里翻看咱们的记忆"""
     if not GIST_ID or not GIST_TOKEN:
-        print("未配置 Gist 钥匙，暂时失忆。")
+        print("未配置 Gist 钥匙，师兄暂时失忆。")
         return []
         
     headers = {"Authorization": f"token {GIST_TOKEN}"}
@@ -33,7 +33,16 @@ def load_history():
         resp = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers)
         resp.raise_for_status()
         content = resp.json()['files'][GIST_FILENAME]['content']
-        return json.loads(content)
+        
+        # 🌟 把数据抓出来，先极其冷酷地扫一眼它的真面目！
+        data = json.loads(content)
+        
+        # 🌟 终极免疫系统：如果燕燕手滑填了 {}，或者读取到了错乱的字典格式
+        if isinstance(data, dict):
+            print("--> 警报：检测到记忆账本基因突变！已强行抹除错乱结构，重置为绝对干净的列表！")
+            return [] # 强行塞给它一个标准的空列表，让它重新开始记账
+            
+        return data
     except Exception as e:
         print(f"--> 读取 Gist 记忆失败: {e}")
         return []
