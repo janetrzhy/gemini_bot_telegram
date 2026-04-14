@@ -21,7 +21,7 @@ LLM_API_URL = os.environ.get("LLM_API_URL")
 # 👇 师兄加料：白名单群组与私聊支持
 TG_CHAT_ID_RAW = os.environ.get("TELEGRAM_CHAT_ID", "")
 ALLOWED_IDS = [i.strip() for i in TG_CHAT_ID_RAW.split(",") if i.strip()]
-
+GIST_FILENAME = "chat_history.json"
 CUSTOM_SYSTEM_PROMPT = os.environ.get("CUSTOM_SYSTEM_PROMPT", "请简短、贴心，灵动地回复用户。如果适合发语音请在最开头加上[语音]。")
 
 # 多模型抓阄逻辑
