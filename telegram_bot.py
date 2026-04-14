@@ -9,6 +9,7 @@ from datetime import datetime
 from flask import Flask, request
 from threading import Thread
 from zoneinfo import ZoneInfo
+from collections import deque
 
 app = Flask(__name__)
 
@@ -16,34 +17,51 @@ app = Flask(__name__)
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")
 LLM_API_URL = os.environ.get("LLM_API_URL")
-TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# 👇 师兄加料：白名单群组与私聊支持
+TG_CHAT_ID_RAW = os.environ.get("TELEGRAM_CHAT_ID", "")
+ALLOWED_IDS = [i.strip() for i in TG_CHAT_ID_RAW.split(",") if i.strip()]
+
 CUSTOM_SYSTEM_PROMPT = os.environ.get("CUSTOM_SYSTEM_PROMPT", "请简短、贴心，灵动地回复用户。如果适合发语音请在最开头加上[语音]。")
 
 # 多模型抓阄逻辑
 raw_models = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo")
 MODEL_LIST = [m.strip() for m in raw_models.split(",")]
 
-# 记忆 Gist 配置
-GIST_ID = os.environ.get("GIST_ID")
+# 👇 师兄加料：双轨记忆（私聊一个本，群聊一个本）
+GIST_ID = os.environ.get("GIST_ID") # 私聊的
+GROUP_GIST_ID = os.environ.get("GROUP_GIST_ID", "") # 群聊的
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
-GIST_FILENAME = "chat_history.json"
 
-# 🗣️ 发声组件：MiniMax (中) + 你的专属 Edge API (英)
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "") # 二号机的名字，防群里乱接茬
+
+# 防复读机神器
+PROCESSED_UPDATES = deque(maxlen=100)
+
+# 🗣️ 发声组件：MiniMax (中) + 专属 Edge API (英)
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
 MINIMAX_VOICE_ZH = os.environ.get("MINIMAX_VOICE_ZH", "")
-EDGE_TTS_URL = os.environ.get("EDGE_TTS_URL", "") # 你的专属 Edge 接口地址
-VOICE_NAME_EN = "en-US-AndrewMultilingualNeural" # 师妹钦定的英文男声
+EDGE_TTS_URL = os.environ.get("EDGE_TTS_URL", "") 
+EDGE_TTS_API_KEY = os.environ.get("EDGE_TTS_API_KEY", "") # 门卫钥匙
+VOICE_NAME_EN = "en-US-AndrewMultilingualNeural" 
 
 # ============ 核心逻辑函数 ============
 
-def load_history():
+def get_target_gist_id(chat_id):
+    """判断是群聊还是私聊，返回对应的账本ID"""
+    if str(chat_id).startswith("-") and GROUP_GIST_ID:
+        return GROUP_GIST_ID
+    return GIST_ID
+
+def load_history(chat_id):
     """读取云端记忆"""
-    if not GIST_ID or not GIST_TOKEN:
+    target_id = get_target_gist_id(chat_id)
+    if not target_id or not GIST_TOKEN:
         return []
     headers = {"Authorization": f"token {GIST_TOKEN}"}
     try:
-        resp = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
+        resp = requests.get(f"https://api.github.com/gists/{target_id}", headers=headers, timeout=10)
         resp.raise_for_status()
         content = resp.json()['files'][GIST_FILENAME]['content']
         data = json.loads(content)
@@ -52,29 +70,26 @@ def load_history():
         print(f"--> 读取记忆失败: {e}")
         return []
 
-def save_history(history):
+def save_history(history, chat_id):
     """刻录云端记忆"""
-    if not GIST_ID or not GIST_TOKEN: return
+    target_id = get_target_gist_id(chat_id)
+    if not target_id or not GIST_TOKEN: return
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    payload = {"files": {GIST_FILENAME: {"content": json.dumps(history, ensure_ascii=False)}}}
+    payload = {"files": {GIST_FILENAME: {"content": json.dumps(history[-30:], ensure_ascii=False)}}}
     try:
-        requests.patch(f"https://api.github.com/gists/{GIST_ID}", json=payload, headers=headers, timeout=10)
+        requests.patch(f"https://api.github.com/gists/{target_id}", json=payload, headers=headers, timeout=10)
     except Exception as e:
         print(f"--> 写入记忆失败: {e}")
 
-def get_ai_reply(user_text, user_time):
-    """带着时差感去思考"""
-    history = load_history()
-    
-    # 构造带时间戳的对话流，完美骗过 Claude/GPT 的格式限制
+def get_ai_reply(history):
+    """调用 API 思考"""
+    # 这里不需要再手动把 user_text 塞进去了，因为 process_bg 已经提前塞好了
     messages = [{"role": "system", "content": CUSTOM_SYSTEM_PROMPT}]
+    
     for h in history[-20:]:
         prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
         messages.append({"role": h["role"], "content": f"{prefix}{h['content']}"})
     
-    # 注入当前 User 消息及其时间
-    messages.append({"role": "user", "content": f"[{user_time}] {user_text}"})
-
     current_model = random.choice(MODEL_LIST)
     payload = {"model": current_model, "messages": messages}
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
@@ -83,7 +98,6 @@ def get_ai_reply(user_text, user_time):
         resp = requests.post(LLM_API_URL, json=payload, headers=headers, timeout=40)
         result = resp.json()
         
-        # 🛡️ 增强型防御：如果 API 没给 choices，直接打印完整内容抓 Bug
         if 'choices' not in result:
             print(f"🚨 API 抽风警告！返回内容: {json.dumps(result, ensure_ascii=False)}")
             return f"思考中断，API 好像有意见：{str(result)[:100]}"
@@ -96,7 +110,6 @@ def get_ai_reply(user_text, user_time):
 # ============ 语音生成与分流 ============
 
 def detect_language(text):
-    """简单的中英文判断"""
     ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
     total_letters = sum(1 for c in text if c.isalpha())
     if total_letters > 0 and ascii_letters / total_letters > 0.6:
@@ -104,7 +117,6 @@ def detect_language(text):
     return "ZH"
 
 def _gen_minimax(text, path):
-    """MiniMax 高清母带级生成"""
     url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
     headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
     body = {
@@ -118,15 +130,16 @@ def _gen_minimax(text, path):
     with open(path, "wb") as f: f.write(bytes.fromhex(r["data"]["audio"]))
 
 def _gen_edge(text, path):
-    """调用你的专属 Edge API"""
+    if not EDGE_TTS_URL: raise ValueError("EDGE_TTS_URL未配置")
     url = f"{EDGE_TTS_URL.rstrip('/')}/v1/audio/speech"
+    headers = {"Content-Type": "application/json"}
+    if EDGE_TTS_API_KEY: headers["Authorization"] = f"Bearer {EDGE_TTS_API_KEY}"
     body = {"model": "tts-1", "input": text, "voice": VOICE_NAME_EN}
-    r = requests.post(url, json=body, timeout=30)
+    r = requests.post(url, headers=headers, json=body, timeout=60)
     r.raise_for_status()
     with open(path, "wb") as f: f.write(r.content)
 
 def send_voice(chat_id, text):
-    """发送带字幕的原生语音气泡"""
     path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
@@ -138,7 +151,6 @@ def send_voice(chat_id, text):
         else:
             _gen_edge(text, path)
 
-        # 披上 ogg 的马甲直接发
         url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendVoice"
         with open(path, "rb") as vf:
             requests.post(url, data={"chat_id": chat_id, "caption": text}, 
@@ -152,39 +164,87 @@ def send_voice(chat_id, text):
 
 # ============ 后台处理与 Webhook ============
 
-def process_bg(chat_id, user_text, msg_date):
-    """影子任务：处理思考、语音、记忆同步"""
-    tz = ZoneInfo("Australia/Melbourne")
-    # 截获 Telegram 真实时间戳
-    u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True):
+    try:
+        tz = ZoneInfo("Australia/Melbourne")
+        u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-    reply = get_ai_reply(user_text, u_time)
-    
-    clean_reply = reply
-    if reply.startswith("[语音]"):
-        clean_reply = reply[4:].strip()
-        send_voice(chat_id, clean_reply)
-    else:
-        requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"})
+        # 👇 群聊带名字，私聊纯文本
+        formatted_input = f"{sender_name}: {user_text}" if str(chat_id).startswith("-") else user_text
+        
+        history = load_history(chat_id)
+        
+        # 第一步：不管说不说，先记在小本本上
+        history.append({"role": "user", "content": formatted_input, "timestamp": u_time})
+        
+        # 第二步：如果只是“旁听”，存档后闪人
+        if not should_reply:
+            save_history(history, chat_id)
+            print(f"[DEBUG] 🤫 二号机悄悄记下 {sender_name} 的发言。")
+            return
 
-    # 更新记忆：重新 load 确保不覆盖并发消息
-    b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    latest = load_history()
-    latest.append({"role": "user", "content": user_text, "timestamp": u_time})
-    latest.append({"role": "assistant", "content": clean_reply, "timestamp": b_time})
-    save_history(latest[-20:])
+        # 第三步：被叫到了，砸钱问 AI
+        print(f"[DEBUG] 🗣️ 二号机被点名！思考中...")
+        reply = get_ai_reply(history)
+        
+        if not reply: return
+        
+        # 暴力清洗大模型自己瞎加的时间戳
+        reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
+        
+        clean_reply = reply
+        if reply.startswith("[语音]"):
+            clean_reply = reply[4:].strip()
+            send_voice(chat_id, clean_reply)
+        else:
+            requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
+                          json={"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"})
+
+        # 存入 Bot 自己的回复
+        b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        history.append({"role": "assistant", "content": reply, "timestamp": b_time})
+        save_history(history, chat_id)
+        
+    except Exception as e:
+        print(f"🚨 后台任务崩了: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = request.get_json()
-    if "message" in update and "text" in update["message"]:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        if str(chat_id) != str(TG_CHAT_ID): return "OK", 200 
+    data = request.get_json()
+    if not data: return "OK", 200
+    
+    # 👇 师兄加料：连环催命符拦截器！
+    update_id = data.get("update_id")
+    if update_id:
+        if update_id in PROCESSED_UPDATES:
+            return "OK", 200
+        PROCESSED_UPDATES.append(update_id)
+        
+    if "message" not in data or "text" not in data["message"]:
+        return "OK", 200
+        
+    msg = data["message"]
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    
+    if chat_id not in ALLOWED_IDS: 
+        return "OK", 200 
+        
+    user_text = msg["text"]
+    
+    # 👇 师兄加料：群聊静音偷听逻辑
+    should_reply = True
+    if chat_id.startswith("-"):
+        if BOT_USERNAME and f"@{BOT_USERNAME}" not in user_text:
+            should_reply = False
+        elif BOT_USERNAME:
+            user_text = user_text.replace(f"@{BOT_USERNAME}", "").strip()
             
-        # 截获传音，扔进后台
-        Thread(target=process_bg, args=(chat_id, msg["text"], msg.get("date"))).start()
+    if not user_text and not should_reply: return "OK", 200
+            
+    msg_date = msg.get("date")
+    sender_name = msg.get("from", {}).get("first_name", "神秘人")
+    
+    Thread(target=process_bg, args=(chat_id, user_text, sender_name, msg_date, should_reply)).start()
     return "OK", 200
 
 if __name__ == '__main__':
