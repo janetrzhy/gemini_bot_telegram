@@ -33,6 +33,7 @@ MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
 MINIMAX_VOICE_ZH = os.environ.get("MINIMAX_VOICE_ZH", "")
 EDGE_TTS_URL = os.environ.get("EDGE_TTS_URL", "") # 你的专属 Edge 接口地址
+EDGE_TTS_API_KEY = os.environ.get("EDGE_TTS_API_KEY", "")
 VOICE_NAME_EN = "en-US-AndrewMultilingualNeural" # 师妹钦定的英文男声
 
 # ============ 核心逻辑函数 ============
