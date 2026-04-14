@@ -47,39 +47,50 @@ EDGE_TTS_API_KEY = os.environ.get("EDGE_TTS_API_KEY", "") # 门卫钥匙
 VOICE_NAME_EN = "en-US-AndrewMultilingualNeural" 
 
 # ============ 核心逻辑函数 ============
-
 def get_target_gist_id(chat_id):
-    """判断是群聊还是私聊，返回对应的账本ID"""
-    if str(chat_id).startswith("-") and GROUP_GIST_ID:
-        return GROUP_GIST_ID
-    return GIST_ID
+    """极其强壮的 ID 提取器，管你填的是长 URL 还是纯 ID，统统揪出来"""
+    raw_id = GROUP_GIST_ID if str(chat_id).startswith("-") and GROUP_GIST_ID else GIST_ID
+    if not raw_id: return None
+    # 自动斩断前面的网址，只留最后的 ID
+    return raw_id.rstrip("/").split("/")[-1]
 
 def load_history(chat_id):
-    """读取云端记忆"""
+    """读取云端记忆（带报错排雷）"""
     target_id = get_target_gist_id(chat_id)
     if not target_id or not GIST_TOKEN:
         return []
     headers = {"Authorization": f"token {GIST_TOKEN}"}
     try:
         resp = requests.get(f"https://api.github.com/gists/{target_id}", headers=headers, timeout=10)
-        resp.raise_for_status()
-        content = resp.json()['files'][GIST_FILENAME]['content']
+        if resp.status_code != 200:
+            print(f"🚨 [读取警告] Gist拒绝访问 ({resp.status_code}): {resp.text[:150]}")
+            return []
+        
+        # 安全提取，就算新建的 Gist 是个空壳或者名字不对，也不会崩溃
+        files = resp.json().get('files', {})
+        content = files.get(GIST_FILENAME, {}).get('content', '[]')
+        
         data = json.loads(content)
         return data if isinstance(data, list) else []
     except Exception as e:
-        print(f"--> 读取记忆失败: {e}")
+        print(f"🚨 [读取崩溃]: {e}")
         return []
 
 def save_history(history, chat_id):
-    """刻录云端记忆"""
+    """刻录云端记忆（失败必报警）"""
     target_id = get_target_gist_id(chat_id)
     if not target_id or not GIST_TOKEN: return
     headers = {"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     payload = {"files": {GIST_FILENAME: {"content": json.dumps(history[-30:], ensure_ascii=False)}}}
     try:
-        requests.patch(f"https://api.github.com/gists/{target_id}", json=payload, headers=headers, timeout=10)
+        resp = requests.patch(f"https://api.github.com/gists/{target_id}", json=payload, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            # 👇 核心报警器：如果 GitHub 敢拒绝，立刻在日志里大声嚷嚷！
+            print(f"🚨 [保存惨死] GitHub 报错 ({resp.status_code}): {resp.text[:200]}")
+        else:
+            print(f"[DEBUG] 💾 记忆完美写入 Gist (ID: {target_id[:6]}...)")
     except Exception as e:
-        print(f"--> 写入记忆失败: {e}")
+        print(f"🚨 [写入崩溃]: {e}")
 
 def get_ai_reply(history):
     """调用 API 思考"""
