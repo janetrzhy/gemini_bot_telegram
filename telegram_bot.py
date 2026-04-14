@@ -118,13 +118,25 @@ def _gen_minimax(text, path):
     with open(path, "wb") as f: f.write(bytes.fromhex(r["data"]["audio"]))
 
 def _gen_edge(text, path):
-    """调用你的专属 Edge API"""
+    if not EDGE_TTS_URL:
+        raise ValueError("EDGE_TTS_URL 没配置！")
     url = f"{EDGE_TTS_URL.rstrip('/')}/v1/audio/speech"
+        headers = {"Content-Type": "application/json"}
+    # 👇 如果配了钥匙，就在敲门的时候把它举起来！
+    if EDGE_TTS_API_KEY:
+        headers["Authorization"] = f"Bearer {EDGE_TTS_API_KEY}"
+        
     body = {"model": "tts-1", "input": text, "voice": VOICE_NAME_EN}
-    r = requests.post(url, json=body, timeout=30)
-    r.raise_for_status()
-    with open(path, "wb") as f: f.write(r.content)
-
+    resp = requests.post(url, headers=headers, json=body, timeout=60) # 顺手把耐心延长到60秒
+    
+    # 如果还是被拒绝，打印出错原因，不要瞎猜
+    if resp.status_code != 200:
+        print(f"🚨 Edge TTS 报错: 状态码 {resp.status_code}, 内容: {resp.text}")
+        
+    resp.raise_for_status()
+    with open(mp3_path, "wb") as f:
+        f.write(resp.content)
+    
 def send_voice(chat_id, text):
     """发送带字幕的原生语音气泡"""
     path = None
