@@ -92,10 +92,15 @@ def save_history(history, chat_id):
     except Exception as e:
         print(f"🚨 [写入崩溃]: {e}")
 
-def get_ai_reply(history):
-    """调用 API 思考"""
-    # 这里不需要再手动把 user_text 塞进去了，因为 process_bg 已经提前塞好了
-    messages = [{"role": "system", "content": CUSTOM_SYSTEM_PROMPT}]
+def get_ai_reply(history, chat_id):
+    """调用 API 思考（带群聊认知注入）"""
+    system_content = CUSTOM_SYSTEM_PROMPT
+    
+    # 👇 师兄的认知补丁：如果在群里，强行告诉它前面的前缀是人名！
+    if str(chat_id).startswith("-"):
+        system_content += "\n注意：当前是群聊模式，用户的消息格式为“发言人名字: 具体内容”。请根据发言人名字来分辨说话的对象，并做出针对性回复。"
+        
+    messages = [{"role": "system", "content": system_content}]
     
     for h in history[-20:]:
         prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
@@ -185,22 +190,19 @@ def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True):
         
         history = load_history(chat_id)
         
-        # 第一步：不管说不说，先记在小本本上
         history.append({"role": "user", "content": formatted_input, "timestamp": u_time})
         
-        # 第二步：如果只是“旁听”，存档后闪人
         if not should_reply:
             save_history(history, chat_id)
             print(f"[DEBUG] 🤫 二号机悄悄记下 {sender_name} 的发言。")
             return
 
-        # 第三步：被叫到了，砸钱问 AI
         print(f"[DEBUG] 🗣️ 二号机被点名！思考中...")
-        reply = get_ai_reply(history)
+        # 👇 师兄正骨：把 chat_id 传进去，让大脑知道现在是不是在群里！
+        reply = get_ai_reply(history, chat_id)
         
         if not reply: return
         
-        # 暴力清洗大模型自己瞎加的时间戳
         reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
         
         clean_reply = reply
@@ -211,7 +213,6 @@ def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True):
             requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
                           json={"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"})
 
-        # 存入 Bot 自己的回复
         b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
         save_history(history, chat_id)
