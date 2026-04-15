@@ -179,42 +179,45 @@ def send_voice(chat_id, text):
         if path and os.path.exists(path): os.unlink(path)
 
 # ============ 后台处理与 Webhook ============
-
 def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True):
     try:
         tz = ZoneInfo("Australia/Melbourne")
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 👇 群聊带名字，私聊纯文本
         formatted_input = f"{sender_name}: {user_text}" if str(chat_id).startswith("-") else user_text
         
+        # 1️⃣ 师兄正骨：先把历史读入内存
         history = load_history(chat_id)
-        
         history.append({"role": "user", "content": formatted_input, "timestamp": u_time})
         
+        # ❌ 删掉原本在这里的 save_history(history, chat_id)
+        
+        # 2️⃣ 如果只是“旁听”，我们就在内存里记着，不去撞 GitHub 的门
         if not should_reply:
-            save_history(history, chat_id)
-            print(f"[DEBUG] 🤫 二号机悄悄记下 {sender_name} 的发言。")
+            # 只要 Render 没重启，这些对话就会暂时存在内存里，等着被一次性写入
+            print(f"[DEBUG] 🤫 内存已暂存 {sender_name} 的发言。")
             return
 
+        # 3️⃣ 只有真正要回复的时候，才去调 API 并存盘
         print(f"[DEBUG] 🗣️ 二号机被点名！思考中...")
-        # 👇 师兄正骨：把 chat_id 传进去，让大脑知道现在是不是在群里！
         reply = get_ai_reply(history, chat_id)
         
         if not reply: return
         
         reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
         
-        clean_reply = reply
+        # 发送逻辑保持不变
         if reply.startswith("[语音]"):
-            clean_reply = reply[4:].strip()
-            send_voice(chat_id, clean_reply)
+            send_voice(chat_id, reply[4:].strip())
         else:
             requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
-                          json={"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"})
+                          json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
 
+        # 4️⃣ 存入 Bot 的回复并【统一保存】
         b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
+        
+        # ✅ 只有在这里才执行一次写入，把之前的“偷听”和现在的“回复”一起打包带走！
         save_history(history, chat_id)
         
     except Exception as e:
