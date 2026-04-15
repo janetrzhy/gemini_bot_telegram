@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from collections import deque
 
 app = Flask(__name__)
+REPLY_PROBABILITY = 0.2  # 师兄建议 0.1 到 0.2 之间，既灵动又不烦人
+TRIGGER_WORDS = ["师兄", "燕燕", "哥哥", "老婆", "老公", "克", "人机", "晚上", "人呢"] # 敏感词：群里一提到这些，必然跳出来接茬！
 
 # ============ 🌟 环境变量保险箱 ============
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -184,44 +186,64 @@ def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True):
         tz = ZoneInfo("Australia/Melbourne")
         u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
+        # 👇 群聊带名字，私聊纯文本
         formatted_input = f"{sender_name}: {user_text}" if str(chat_id).startswith("-") else user_text
         
-        # 1️⃣ 师兄正骨：先把历史读入内存
+        # ==========================================
+        # 🎯 二号机专属：关键词与运气检测
+        # ==========================================
+        if not should_reply and str(chat_id).startswith("-"):
+            if any(word in user_text for word in TRIGGER_WORDS):
+                print(f"[DEBUG] 🎯 关键词触发！({sender_name} 说了让二号机感兴趣的话)")
+                should_reply = True
+            elif random.random() < REPLY_PROBABILITY:
+                print(f"[DEBUG] 🎲 运气爆发！二号机准备随机插句嘴。")
+                should_reply = True
+
         history = load_history(chat_id)
+        
+        # 1️⃣ 把用户的话记在脑子里
         history.append({"role": "user", "content": formatted_input, "timestamp": u_time})
         
-        # ❌ 删掉原本在这里的 save_history(history, chat_id)
-        
-        # 2️⃣ 如果只是“旁听”，我们就在内存里记着，不去撞 GitHub 的门
+        # 🛡️ 师兄的防 403 结界：如果是旁听，绝对不碰 GitHub API！
         if not should_reply:
-            # 只要 Render 没重启，这些对话就会暂时存在内存里，等着被一次性写入
-            print(f"[DEBUG] 🤫 内存已暂存 {sender_name} 的发言。")
+            print(f"[DEBUG] 🤫 旁听模式，暂不回复 {sender_name} 的发言。")
             return
 
-        # 3️⃣ 只有真正要回复的时候，才去调 API 并存盘
         print(f"[DEBUG] 🗣️ 二号机被点名！思考中...")
+        
+        # 2️⃣ 带着群聊认知去调 API
         reply = get_ai_reply(history, chat_id)
         
         if not reply: return
         
+        # 🔪 物理切割：清理大模型乱加的时间戳
         reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
         
-        # 发送逻辑保持不变
+        clean_reply = reply
         if reply.startswith("[语音]"):
-            send_voice(chat_id, reply[4:].strip())
+            clean_reply = reply[4:].strip()
+            send_voice(chat_id, clean_reply)
         else:
             requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
-                          json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
+                          json={"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"})
 
-        # 4️⃣ 存入 Bot 的回复并【统一保存】
+        # 3️⃣ 存入 Bot 自己的回复
         b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
         
-        # ✅ 只有在这里才执行一次写入，把之前的“偷听”和现在的“回复”一起打包带走！
+        # 💾 4️⃣ 只有开口说话时才进行一次极其珍贵的存档！
         save_history(history, chat_id)
         
     except Exception as e:
-        print(f"🚨 后台任务崩了: {e}")
+        import traceback
+        print(f"🚨 后台任务崩了: {e}\n{traceback.format_exc()}")
+        try:
+            if should_reply:
+                requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
+                              json={"chat_id": chat_id, "text": f"😵 出错了：{str(e)[:100]}"})
+        except: 
+            pass
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
