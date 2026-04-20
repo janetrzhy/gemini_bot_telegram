@@ -105,7 +105,7 @@ def get_ai_reply(history, chat_id):
     
     # 👇 师兄的认知补丁：如果在群里，强行告诉它前面的前缀是人名！
     if str(chat_id).startswith("-"):
-        system_content += "\n注意：当前是群聊模式，用户的消息格式为“发言人名字: 具体内容”。请根据发言人名字来分辨说话的对象，并做出针对性回复。"
+        system_content += '\n注意：当前是群聊模式，用户的消息格式为"发言人名字: 具体内容"。请根据发言人名字来分辨说话的对象，并做出针对性回复。'
         
     messages = [{"role": "system", "content": system_content}]
     
@@ -192,34 +192,34 @@ def send_voice(chat_id, text, reply_to_message_id=None):
 # ============ 后台处理与 Webhook ============
 def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True, message_id=None, direct_trigger=False):
     try:
-        tz = ZoneInfo(“Australia/Melbourne”)
-        u_time = datetime.fromtimestamp(msg_date, tz).strftime(“%Y-%m-%d %H:%M:%S”) if msg_date else datetime.now(tz).strftime(“%Y-%m-%d %H:%M:%S”)
+        tz = ZoneInfo("Australia/Melbourne")
+        u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
         # 👇 群聊带名字，私聊纯文本
-        formatted_input = f”{sender_name}: {user_text}” if str(chat_id).startswith(“-”) else user_text
+        formatted_input = f"{sender_name}: {user_text}" if str(chat_id).startswith("-") else user_text
 
         # ==========================================
         # 🎯 社交牛逼症引擎：加装 60秒 CD 锁
         # ==========================================
-        if not should_reply and str(chat_id).startswith(“-”):
+        if not should_reply and str(chat_id).startswith("-"):
             current_time = time.time()
             last_time = LAST_SPOKE.get(chat_id, 0)
 
             if current_time - last_time > COOLDOWN_TIME:
                 if any(word in user_text for word in TRIGGER_WORDS):
-                    print(f”[DEBUG] 🎯 关键词触发！”)
+                    print(f"[DEBUG] 🎯 关键词触发！")
                     should_reply = True
                     direct_trigger = True  # 关键词触发也算精准触发
                     LAST_SPOKE[chat_id] = current_time
                 elif random.random() < REPLY_PROBABILITY:
-                    print(f”[DEBUG] 🎲 运气爆发！准备随机插嘴。”)
+                    print(f"[DEBUG] 🎲 运气爆发！准备随机插嘴。")
                     should_reply = True
                     # 随机插嘴不算精准触发，direct_trigger 保持 False
                     LAST_SPOKE[chat_id] = current_time
             else:
-                print(f”[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。”)
+                print(f"[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。")
 
-        user_entry = {“role”: “user”, “content”: formatted_input, “timestamp”: u_time}
+        user_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
 
         # 🛡️ 旁听模式：消息进内存缓冲区，完全不碰 Gist API
         if not should_reply:
@@ -227,16 +227,16 @@ def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True, mes
             buf.append(user_entry)
             if len(buf) > 50:
                 MESSAGE_BUFFER[chat_id] = buf[-50:]
-            print(f”[DEBUG] 🤫 旁听模式，{sender_name} 的发言已缓存（共 {len(MESSAGE_BUFFER[chat_id])} 条）。”)
+            print(f"[DEBUG] 🤫 旁听模式，{sender_name} 的发言已缓存（共 {len(MESSAGE_BUFFER[chat_id])} 条）。")
             return
 
-        print(f”[DEBUG] 🗣️ 二号机被点名！思考中...”)
+        print(f"[DEBUG] 🗣️ 二号机被点名！思考中...")
 
         # 1️⃣ 读取 Gist 历史，合并缓冲区里积攒的群聊记录
         history = load_history(chat_id)
         buffered = MESSAGE_BUFFER.pop(chat_id, [])
         if buffered:
-            print(f”[DEBUG] 📥 合并 {len(buffered)} 条缓冲消息到历史。”)
+            print(f"[DEBUG] 📥 合并 {len(buffered)} 条缓冲消息到历史。")
             history.extend(buffered)
         history.append(user_entry)
 
@@ -251,37 +251,37 @@ def process_bg(chat_id, user_text, sender_name, msg_date, should_reply=True, mes
         # 🎯 60% 概率用 Telegram reply 精准回复触发消息（仅限 @mention 或关键词触发）
         use_reply_to = (
             direct_trigger and
-            str(chat_id).startswith(“-”) and
+            str(chat_id).startswith("-") and
             message_id is not None and
             random.random() < REPLY_FEATURE_PROB
         )
         if use_reply_to:
-            print(f”[DEBUG] ↩️ 使用 reply 精准回复 message_id={message_id}”)
+            print(f"[DEBUG] ↩️ 使用 reply 精准回复 message_id={message_id}")
 
         clean_reply = reply
-        if reply.startswith(“[语音]”):
+        if reply.startswith("[语音]"):
             clean_reply = reply[4:].strip()
             send_voice(chat_id, clean_reply, reply_to_message_id=message_id if use_reply_to else None)
         else:
-            payload = {“chat_id”: chat_id, “text”: clean_reply, “parse_mode”: “Markdown”}
+            payload = {"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"}
             if use_reply_to:
-                payload[“reply_to_message_id”] = message_id
-            requests.post(f”https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage”, json=payload)
+                payload["reply_to_message_id"] = message_id
+            requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload)
 
         # 3️⃣ 存入 Bot 自己的回复
-        b_time = datetime.now(tz).strftime(“%Y-%m-%d %H:%M:%S”)
-        history.append({“role”: “assistant”, “content”: reply, “timestamp”: b_time})
+        b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        history.append({"role": "assistant", "content": reply, "timestamp": b_time})
 
         # 💾 4️⃣ 只有开口说话时才进行一次极其珍贵的存档！
         save_history(history, chat_id)
 
     except Exception as e:
         import traceback
-        print(f”🚨 后台任务崩了: {e}\n{traceback.format_exc()}”)
+        print(f"🚨 后台任务崩了: {e}\n{traceback.format_exc()}")
         try:
             if should_reply:
-                requests.post(f”https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage”,
-                              json={“chat_id”: chat_id, “text”: f”😵 出错了：{str(e)[:100]}”})
+                requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                              json={"chat_id": chat_id, "text": f"😵 出错了：{str(e)[:100]}"})
         except:
             pass
 
