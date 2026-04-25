@@ -130,6 +130,109 @@ def get_ai_reply(history, chat_id):
         print(f"思考过程崩了: {e}")
         return "神经元刚才短路了一下下... 👀"
 
+# ============ 图片识别 ============
+
+def get_image_as_base64(file_id):
+    import base64
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10
+        )
+        file_path = r.json()["result"]["file_path"]
+        img_bytes = requests.get(
+            f"https://api.telegram.org/file/bot{TG_BOT_TOKEN}/{file_path}",
+            timeout=30
+        ).content
+        return base64.b64encode(img_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"[IMAGE] 图片下载失败: {e}")
+        return None
+
+def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_reply=True, message_id=None, direct_trigger=False):
+    """处理图片消息，不写入聊天记录（无 Gist 读写）。"""
+    try:
+        # ---- 群聊随机触发逻辑（与 process_bg 完全一致）----
+        if not should_reply and str(chat_id).startswith("-"):
+            current_time = time.time()
+            last_time = LAST_SPOKE.get(chat_id, 0)
+            if current_time - last_time > COOLDOWN_TIME:
+                if any(word in caption for word in TRIGGER_WORDS):
+                    print(f"[IMAGE] 🎯 关键词触发！")
+                    should_reply = True
+                    direct_trigger = True
+                    LAST_SPOKE[chat_id] = current_time
+                elif random.random() < REPLY_PROBABILITY:
+                    print(f"[IMAGE] 🎲 随机插嘴图片！")
+                    should_reply = True
+                    LAST_SPOKE[chat_id] = current_time
+            else:
+                print(f"[IMAGE] 🛑 冷却期内，忽略图片。")
+
+        if not should_reply:
+            print(f"[IMAGE] 旁听模式，图片静默丢弃。")
+            return
+
+        print(f"[IMAGE] 开始处理 {sender_name} 的图片...")
+
+        b64 = get_image_as_base64(file_id)
+        if not b64:
+            return
+
+        prompt_text = caption if caption else "请描述这张图片的内容。"
+        system_content = CUSTOM_SYSTEM_PROMPT
+        if str(chat_id).startswith("-"):
+            system_content += '\n注意：当前是群聊模式，用户的消息格式为"发言人名字: 具体内容"。请根据发言人名字来分辨说话的对象，并做出针对性回复。'
+            prompt_text = f"{sender_name}: {prompt_text}"
+
+        current_model = random.choice(MODEL_LIST)
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt_text},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]}
+        ]
+        headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+        resp = requests.post(LLM_API_URL, json={"model": current_model, "messages": messages}, headers=headers, timeout=90)
+        result = resp.json()
+
+        if 'choices' not in result:
+            print(f"[IMAGE] API 异常: {json.dumps(result, ensure_ascii=False)}")
+            return
+
+        reply = result['choices'][0]['message']['content']
+        reply = re.sub(r'^\[202\d-[^\]]+\]\s*', '', reply.strip())
+
+        use_reply_to = (
+            direct_trigger and
+            str(chat_id).startswith("-") and
+            message_id is not None and
+            random.random() < REPLY_FEATURE_PROB
+        )
+        if use_reply_to:
+            print(f"[IMAGE] ↩️ 使用 reply 精准回复 message_id={message_id}")
+
+        clean_reply = reply
+        if reply.startswith("[语音]"):
+            clean_reply = reply[4:].strip()
+            send_voice(chat_id, clean_reply, reply_to_message_id=message_id if use_reply_to else None)
+        else:
+            payload = {"chat_id": chat_id, "text": clean_reply, "parse_mode": "Markdown"}
+            if use_reply_to:
+                payload["reply_to_message_id"] = message_id
+            requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload)
+
+    except Exception as e:
+        import traceback
+        print(f"[IMAGE] 后台任务崩了: {e}\n{traceback.format_exc()}")
+        try:
+            if should_reply:
+                requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                              json={"chat_id": chat_id, "text": f"😵 图片处理出错：{str(e)[:100]}"})
+        except:
+            pass
+
 # ============ 语音生成与分流 ============
 
 def detect_language(text):
@@ -297,17 +400,39 @@ def webhook():
             return "OK", 200
         PROCESSED_UPDATES.append(update_id)
         
-    if "message" not in data or "text" not in data["message"]:
+    if "message" not in data:
         return "OK", 200
-        
+
     msg = data["message"]
+    has_text = "text" in msg
+    has_photo = "photo" in msg
+    if not has_text and not has_photo:
+        return "OK", 200
+
     chat_id = str(msg.get("chat", {}).get("id", ""))
-    
-    if chat_id not in ALLOWED_IDS: 
-        return "OK", 200 
-        
-    user_text = msg["text"]
+    if chat_id not in ALLOWED_IDS:
+        return "OK", 200
+
     message_id = msg.get("message_id")
+    msg_date = msg.get("date")
+    sender_name = msg.get("from", {}).get("first_name", "神秘人")
+
+    # ---- 图片分支 ----
+    if has_photo:
+        file_id = msg["photo"][-1]["file_id"]  # 取最高分辨率
+        caption = msg.get("caption", "")
+        should_reply, direct_trigger = True, False
+        if chat_id.startswith("-"):
+            if BOT_USERNAME and f"@{BOT_USERNAME}" not in caption:
+                should_reply = False
+            elif BOT_USERNAME:
+                caption = caption.replace(f"@{BOT_USERNAME}", "").strip()
+                direct_trigger = True
+        Thread(target=process_image_bg, args=(chat_id, file_id, caption, sender_name, msg_date, should_reply, message_id, direct_trigger)).start()
+        return "OK", 200
+
+    # ---- 文字分支（原有逻辑不变）----
+    user_text = msg["text"]
 
     # 👇 师兄加料：群聊静音偷听逻辑
     should_reply = True
@@ -320,9 +445,6 @@ def webhook():
             direct_trigger = True  # @mention 是精准触发
 
     if not user_text and not should_reply: return "OK", 200
-
-    msg_date = msg.get("date")
-    sender_name = msg.get("from", {}).get("first_name", "神秘人")
 
     Thread(target=process_bg, args=(chat_id, user_text, sender_name, msg_date, should_reply, message_id, direct_trigger)).start()
     return "OK", 200
