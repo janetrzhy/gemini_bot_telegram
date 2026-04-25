@@ -41,6 +41,7 @@ GROUP_GIST_ID = os.environ.get("GROUP_GIST_ID", "") # 群聊的
 GIST_TOKEN = os.environ.get("GIST_TOKEN")
 
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "") # 二号机的名字，防群里乱接茬
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "") # Groq Whisper 语音转文字
 
 # 防复读机神器
 PROCESSED_UPDATES = deque(maxlen=100)
@@ -150,8 +151,11 @@ def get_image_as_base64(file_id):
         return None
 
 def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_reply=True, message_id=None, direct_trigger=False):
-    """处理图片消息，不写入聊天记录（无 Gist 读写）。"""
+    """处理图片消息。历史记录存文字摘要（[图片] caption），图片 base64 本身不存 Gist。"""
     try:
+        tz = ZoneInfo("Australia/Melbourne")
+        u_time = datetime.fromtimestamp(msg_date, tz).strftime("%Y-%m-%d %H:%M:%S") if msg_date else datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
         # ---- 群聊随机触发逻辑（与 process_bg 完全一致）----
         if not should_reply and str(chat_id).startswith("-"):
             current_time = time.time()
@@ -169,8 +173,17 @@ def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_re
             else:
                 print(f"[IMAGE] 🛑 冷却期内，忽略图片。")
 
+        # 历史记录条目：只存文字摘要，不存 base64
+        img_label = f"[图片] {caption}" if caption else "[图片]"
+        formatted_input = f"{sender_name}: {img_label}" if str(chat_id).startswith("-") else img_label
+        user_entry = {"role": "user", "content": formatted_input, "timestamp": u_time}
+
         if not should_reply:
-            print(f"[IMAGE] 旁听模式，图片静默丢弃。")
+            buf = MESSAGE_BUFFER.setdefault(chat_id, [])
+            buf.append(user_entry)
+            if len(buf) > 50:
+                MESSAGE_BUFFER[chat_id] = buf[-50:]
+            print(f"[IMAGE] 旁听模式，图片摘要已缓存。")
             return
 
         print(f"[IMAGE] 开始处理 {sender_name} 的图片...")
@@ -179,22 +192,34 @@ def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_re
         if not b64:
             return
 
-        prompt_text = caption if caption else "请描述这张图片的内容。"
+        # 读取历史 + 合并缓冲区（给 LLM 提供对话上下文）
+        history = load_history(chat_id)
+        buffered = MESSAGE_BUFFER.pop(chat_id, [])
+        if buffered:
+            print(f"[IMAGE] 📥 合并 {len(buffered)} 条缓冲消息到历史。")
+            history.extend(buffered)
+
+        # 组装视觉 API 消息：历史走纯文字，当前消息带图片
         system_content = CUSTOM_SYSTEM_PROMPT
         if str(chat_id).startswith("-"):
             system_content += '\n注意：当前是群聊模式，用户的消息格式为"发言人名字: 具体内容"。请根据发言人名字来分辨说话的对象，并做出针对性回复。'
+
+        vision_messages = [{"role": "system", "content": system_content}]
+        for h in history[-20:]:
+            prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
+            vision_messages.append({"role": h["role"], "content": f"{prefix}{h['content']}"})
+
+        prompt_text = caption if caption else "请描述这张图片的内容。"
+        if str(chat_id).startswith("-"):
             prompt_text = f"{sender_name}: {prompt_text}"
+        vision_messages.append({"role": "user", "content": [
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        ]})
 
         current_model = random.choice(MODEL_LIST)
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt_text},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]}
-        ]
         headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
-        resp = requests.post(LLM_API_URL, json={"model": current_model, "messages": messages}, headers=headers, timeout=90)
+        resp = requests.post(LLM_API_URL, json={"model": current_model, "messages": vision_messages}, headers=headers, timeout=90)
         result = resp.json()
 
         if 'choices' not in result:
@@ -223,6 +248,12 @@ def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_re
                 payload["reply_to_message_id"] = message_id
             requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=payload)
 
+        # 存入历史（文字摘要 + bot 回复）
+        b_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        history.append(user_entry)
+        history.append({"role": "assistant", "content": reply, "timestamp": b_time})
+        save_history(history, chat_id)
+
     except Exception as e:
         import traceback
         print(f"[IMAGE] 后台任务崩了: {e}\n{traceback.format_exc()}")
@@ -232,6 +263,48 @@ def process_image_bg(chat_id, file_id, caption, sender_name, msg_date, should_re
                               json={"chat_id": chat_id, "text": f"😵 图片处理出错：{str(e)[:100]}"})
         except:
             pass
+
+# ============ 语音输入（Groq Whisper 转写）============
+
+def transcribe_voice(file_id):
+    """从 Telegram 下载语音文件，用 Groq Whisper 转成文字。"""
+    if not GROQ_API_KEY:
+        print("[VOICE-IN] GROQ_API_KEY 未配置，跳过转写。")
+        return None
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10
+        )
+        file_path = r.json()["result"]["file_path"]
+        ogg_bytes = requests.get(
+            f"https://api.telegram.org/file/bot{TG_BOT_TOKEN}/{file_path}",
+            timeout=30
+        ).content
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("voice.ogg", ogg_bytes, "audio/ogg")},
+            data={"model": "whisper-large-v3-turbo", "response_format": "json"},
+            timeout=30
+        )
+        text = resp.json().get("text", "").strip()
+        print(f"[VOICE-IN] 转写结果: {text[:100]}")
+        return text if text else None
+    except Exception as e:
+        print(f"[VOICE-IN] 转写失败: {e}")
+        return None
+
+def process_voice_bg(chat_id, file_id, sender_name, msg_date, should_reply=True, message_id=None, direct_trigger=False):
+    """转写语音后完全复用 process_bg 流程（含历史记录）。"""
+    transcribed = transcribe_voice(file_id)
+    if not transcribed:
+        if should_reply:
+            requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                          json={"chat_id": chat_id, "text": "😵 语音转写失败了，没听清楚..."})
+        return
+    print(f"[VOICE-IN] {sender_name} 说: {transcribed[:80]}")
+    process_bg(chat_id, transcribed, sender_name, msg_date, should_reply, message_id, direct_trigger)
 
 # ============ 语音生成与分流 ============
 
@@ -406,7 +479,8 @@ def webhook():
     msg = data["message"]
     has_text = "text" in msg
     has_photo = "photo" in msg
-    if not has_text and not has_photo:
+    has_voice = "voice" in msg
+    if not has_text and not has_photo and not has_voice:
         return "OK", 200
 
     chat_id = str(msg.get("chat", {}).get("id", ""))
@@ -429,6 +503,16 @@ def webhook():
                 caption = caption.replace(f"@{BOT_USERNAME}", "").strip()
                 direct_trigger = True
         Thread(target=process_image_bg, args=(chat_id, file_id, caption, sender_name, msg_date, should_reply, message_id, direct_trigger)).start()
+        return "OK", 200
+
+    # ---- 语音输入分支 ----
+    if has_voice:
+        file_id = msg["voice"]["file_id"]
+        should_reply, direct_trigger = True, False
+        # 语音消息无法包含 @mention，群里默认走随机触发逻辑（process_bg 内部处理）
+        if chat_id.startswith("-") and BOT_USERNAME:
+            should_reply = False
+        Thread(target=process_voice_bg, args=(chat_id, file_id, sender_name, msg_date, should_reply, message_id, direct_trigger)).start()
         return "OK", 200
 
     # ---- 文字分支（原有逻辑不变）----
